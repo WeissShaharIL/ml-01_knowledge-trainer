@@ -13,23 +13,12 @@ from transformers import (
 from datasets import Dataset
 
 # ── train.py ───────────────────────────────────────────────────────────────────
-# Step 3 of the knowledge trainer pipeline.
 # Fine-tunes distilbert-base-uncased on all pages in data/pages/ using
-# Masked Language Modeling (MLM) — the same technique used to pretrain BERT.
+# Masked Language Modeling (MLM).
 #
-# What is MLM?
-# The model reads your text with some words randomly masked out (like a cloze
-# test), and learns to predict the missing words. This forces it to build a
-# deep understanding of your domain's vocabulary, facts, and relationships.
-# It's not learning to answer questions directly — it's internalizing the text
-# so deeply that it can later retrieve facts from it.
-#
-# Why MLM instead of supervised fine-tuning?
-# Supervised fine-tuning needs labeled (question, answer) pairs for EVERY fact
-# you want the model to know. MLM needs only raw text — which is exactly what
-# Wikipedia gives us. Much simpler data pipeline, same end result.
-#
-# Every run is tracked in MLflow so you can compare rounds side by side.
+# If data/pages/ is empty (round 0 baseline), we skip fine-tuning entirely
+# and just save the raw pretrained distilbert. This gives us a clean baseline
+# to compare against — the model before it learned anything from our data.
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MLFLOW_DIR   = os.path.join(PROJECT_ROOT, "mlruns")
@@ -40,77 +29,85 @@ MODEL_NAME = "distilbert-base-uncased"
 
 
 def load_pages(pages_dir: str) -> list[str]:
-    """Load all .txt files from pages_dir and return as a list of strings."""
     pattern = os.path.join(pages_dir, "*.txt")
     files   = sorted(glob.glob(pattern))
-
-    if not files:
-        raise FileNotFoundError(f"No .txt files found in {pages_dir}")
-
-    texts = []
+    texts   = []
     for f in files:
         with open(f, "r", encoding="utf-8") as fh:
             texts.append(fh.read())
-
-    print(f"Loaded {len(files)} page(s) from {pages_dir}/")
-    return texts
+    return texts, files
 
 
 def chunk_texts(texts: list[str], tokenizer, chunk_size: int = 512) -> Dataset:
-    """
-    Split texts into chunks of chunk_size tokens.
-    Transformers have a max input length (512 tokens for distilbert).
-    Long Wikipedia articles need to be split into overlapping windows
-    so no information is lost at chunk boundaries.
-    """
     all_chunks = []
     for text in texts:
-        tokens = tokenizer(
-            text,
-            truncation=False,
-            return_tensors=None,
-        )["input_ids"]
-
-        # Slide a window of chunk_size tokens with 50-token overlap
-        step = chunk_size - 50
+        tokens = tokenizer(text, truncation=False, return_tensors=None)["input_ids"]
+        step   = chunk_size - 50
         for i in range(0, len(tokens), step):
             chunk = tokens[i : i + chunk_size]
-            if len(chunk) > 32:  # skip very short trailing chunks
+            if len(chunk) > 32:
                 all_chunks.append({"input_ids": chunk})
-
-    print(f"Created {len(all_chunks)} text chunks for training")
     return Dataset.from_list(all_chunks)
 
 
 def main(round_num: int, epochs: int, batch_size: int):
 
-    pages_dir = os.path.join(PROJECT_ROOT, "data", "pages")
-    texts     = load_pages(pages_dir)
+    pages_dir  = os.path.join(PROJECT_ROOT, "data", "pages")
+    output_dir = os.path.join(PROJECT_ROOT, "models", f"round_{round_num}")
+
+    texts, files = load_pages(pages_dir)
 
     print(f"\nLoading tokenizer and model: {MODEL_NAME}")
     tokenizer = DistilBertTokenizerFast.from_pretrained(MODEL_NAME)
     model     = DistilBertForMaskedLM.from_pretrained(MODEL_NAME)
 
-    dataset = chunk_texts(texts, tokenizer)
+    # ── Baseline mode — no pages yet ──────────────────────────────────────────
+    # If there are no pages we skip training entirely and just save the raw
+    # pretrained model. This is Round 0 — the model before it learned anything.
+    # It gives us a honest baseline to compare all future rounds against.
+    if not texts:
+        print("\nNo pages found in data/pages/ — saving raw pretrained baseline.")
+        print("This is Round 0 — the model knows English but nothing about your topic.\n")
 
-    # MLM data collator — randomly masks 15% of tokens during training.
-    # 15% is the value used in the original BERT paper and works well in practice.
+        os.makedirs(output_dir, exist_ok=True)
+        model.save_pretrained(output_dir)
+        tokenizer.save_pretrained(output_dir)
+
+        run_name = f"round-{round_num}-baseline-0pages"
+        with mlflow.start_run(run_name=run_name):
+            mlflow.log_param("round",       round_num)
+            mlflow.log_param("pages",       0)
+            mlflow.log_param("model",       MODEL_NAME)
+            mlflow.log_param("baseline",    True)
+            mlflow.log_metric("train_loss", 0)
+
+        print(f"Baseline model saved to: {output_dir}")
+        print(f"MLflow run: {run_name}")
+        print(f"\nNext step: python src/serve.py")
+        return
+
+    # ── Normal training mode ───────────────────────────────────────────────────
+    print(f"\nRound {round_num} — training on {len(texts)} page(s)")
+    for f in files:
+        print(f"  {os.path.basename(f)}")
+
+    dataset = chunk_texts(texts, tokenizer)
+    print(f"Created {len(dataset)} text chunks")
+
     data_collator = DataCollatorForLanguageModeling(
         tokenizer=tokenizer,
         mlm=True,
         mlm_probability=0.15,
     )
 
-    output_dir = os.path.join(PROJECT_ROOT, "models", f"round_{round_num}")
-
     training_args = TrainingArguments(
         output_dir=output_dir,
         num_train_epochs=epochs,
         per_device_train_batch_size=batch_size,
-        save_strategy="no",         # we let MLflow handle artifact storage
+        save_strategy="no",
         logging_steps=10,
-        report_to="none",           # disable default logging, we use MLflow
-        no_cuda=True,               # CPU training — set to False if you have a GPU
+        report_to="none",
+        no_cuda=True,
     )
 
     trainer = Trainer(
@@ -122,45 +119,38 @@ def main(round_num: int, epochs: int, batch_size: int):
     )
 
     run_name = f"round-{round_num}-{len(texts)}pages-{epochs}epochs"
-    print(f"\nStarting training run: {run_name}")
-    print(f"Pages: {len(texts)} · Chunks: {len(dataset)} · Epochs: {epochs}")
-    print("This will take a few minutes on CPU...\n")
+    print(f"\nStarting run: {run_name}")
+    print("Training on CPU — this will take a few minutes...\n")
 
     with mlflow.start_run(run_name=run_name):
-        mlflow.log_param("round",       round_num)
-        mlflow.log_param("pages",       len(texts))
-        mlflow.log_param("chunks",      len(dataset))
-        mlflow.log_param("epochs",      epochs)
-        mlflow.log_param("batch_size",  batch_size)
-        mlflow.log_param("model",       MODEL_NAME)
-        mlflow.log_param("mlm_prob",    0.15)
+        mlflow.log_param("round",      round_num)
+        mlflow.log_param("pages",      len(texts))
+        mlflow.log_param("chunks",     len(dataset))
+        mlflow.log_param("epochs",     epochs)
+        mlflow.log_param("batch_size", batch_size)
+        mlflow.log_param("model",      MODEL_NAME)
+        mlflow.log_param("baseline",   False)
 
-        result = trainer.train()
-
+        result     = trainer.train()
         train_loss = result.training_loss
         mlflow.log_metric("train_loss", train_loss)
-
-        # Save model artifact to MLflow
         mlflow.pytorch.log_model(model, name="student-model")
 
-        # Also save locally for evaluate.py to load quickly
         model.save_pretrained(output_dir)
         tokenizer.save_pretrained(output_dir)
-        mlflow.log_param("model_dir", output_dir)
 
-        print(f"\n── Round {round_num} complete ─────────────────────────")
-        print(f"Pages trained on : {len(texts)}")
-        print(f"Training loss    : {train_loss:.4f}")
-        print(f"Model saved to   : {output_dir}")
-        print(f"MLflow run       : {run_name}")
-        print(f"\nNext step: run evaluate.py --model-dir {output_dir}")
+        print(f"\n── Round {round_num} complete ────────────────────────────")
+        print(f"Pages        : {len(texts)}")
+        print(f"Training loss: {train_loss:.4f}")
+        print(f"Model saved  : {output_dir}")
+        print(f"MLflow run   : {run_name}")
+        print(f"\nNext step: python src/evaluate.py --model-dir {output_dir} --round {round_num}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--round",      type=int, default=1)
-    parser.add_argument("--epochs",     type=int, default=3,
-                        help="Training epochs (more = better but slower)")
+    parser.add_argument("--round",      type=int, default=0)
+    parser.add_argument("--epochs",     type=int, default=3)
     parser.add_argument("--batch-size", type=int, default=4)
     args = parser.parse_args()
     main(args.round, args.epochs, args.batch_size)
