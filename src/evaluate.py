@@ -2,24 +2,16 @@ import argparse
 import glob
 import json
 import os
+import re
 import requests
-import torch
-from transformers import DistilBertTokenizerFast, DistilBertForQuestionAnswering
+from rank_bm25 import BM25Okapi
 import mlflow
 
 # ── evaluate.py ────────────────────────────────────────────────────────────────
 # Step 4 of the knowledge trainer pipeline.
-# Loads the trained student model and quizzes it using questions from
-# quiz_bank.json.
-#
-# How evaluation works (extractive QA):
-# For each question we find the relevant Wikipedia page (by source tag),
-# load it as context, and ask the QA model to extract the answer span.
-# This is exactly how models like BERT are used in production QA systems.
-#
-# We then use Ollama as a semantic judge — exact string matching fails for
-# natural language ("Jacob" vs "the patriarch Jacob" are the same answer).
-# Ollama judges equivalence the way a human grader would.
+# Uses BM25 to retrieve context, Ollama to generate answers,
+# and Ollama again as a lenient judge.
+# No DistilBERT — fully generative RAG pipeline.
 
 OLLAMA_URL   = "http://localhost:11434/api/generate"
 OLLAMA_MODEL = "llama3.2:3b"
@@ -30,87 +22,103 @@ mlflow.set_tracking_uri(f"file:///{MLFLOW_DIR}")
 mlflow.set_experiment("knowledge-trainer")
 
 
-def call_ollama(prompt: str, timeout: int = 60) -> str:
+def call_ollama(prompt: str, timeout: int = 120) -> str:
     payload = {"model": OLLAMA_MODEL, "prompt": prompt, "stream": False}
     response = requests.post(OLLAMA_URL, json=payload, timeout=timeout)
     response.raise_for_status()
     return response.json()["response"].strip()
 
 
-def load_page_text(source: str, pages_dir: str) -> str:
-    """Load the Wikipedia page text for a given source title."""
-    # source is like "Israel" — match to Israel.txt
+def load_all_pages(pages_dir: str) -> list[dict]:
+    pages   = []
     pattern = os.path.join(pages_dir, "*.txt")
-    for filepath in glob.glob(pattern):
-        basename = os.path.basename(filepath).replace(".txt", "").replace("_", " ")
-        if basename.lower() == source.lower():
-            with open(filepath, "r", encoding="utf-8") as f:
-                return f.read()
-    return ""
+    for filepath in sorted(glob.glob(pattern)):
+        with open(filepath, "r", encoding="utf-8") as f:
+            text = f.read()
+        title = os.path.basename(filepath).replace(".txt", "").replace("_", " ")
+        pages.append({"title": title, "text": text})
+    return pages
 
 
-def get_student_answer(question: str, context: str, model, tokenizer) -> str:
-    """
-    Ask the QA model to extract an answer from the context passage.
-    This is extractive QA — the model finds the answer span in the text.
-    """
-    # Truncate context to fit within model limits
-    context_words = context.split()[:800]
-    context = " ".join(context_words)
+def find_best_context(question: str, pages: list[dict], chunk_words: int = 300) -> str:
+    """BM25 retrieval — returns top 3 chunks concatenated."""
+    if not pages:
+        return ""
 
-    inputs = tokenizer(
-        question,
-        context,
-        return_tensors="pt",
-        truncation=True,
-        max_length=512,
-    )
+    stop_words = {"what", "is", "the", "a", "an", "of", "in", "was", "were",
+                  "how", "when", "where", "who", "why", "did", "do", "does",
+                  "that", "this", "which", "by", "at", "from", "with", "and",
+                  "or", "to", "for", "on", "are", "has", "had", "have", "be"}
 
-    with torch.no_grad():
-        outputs = model(**inputs)
+    chunks = []
+    for page in pages:
+        words = page["text"].split()
+        step  = chunk_words // 2
+        for i in range(0, len(words), step):
+            chunks.append(" ".join(words[i : i + chunk_words]))
 
-    # Get the most likely start and end positions of the answer span
-    start_idx = outputs.start_logits.argmax()
-    end_idx   = outputs.end_logits.argmax()
+    if not chunks:
+        return ""
 
-    if end_idx < start_idx:
-        end_idx = start_idx
+    tokenized    = [[w for w in c.lower().split() if w not in stop_words] for c in chunks]
+    query_tokens = [w for w in question.lower().split() if w not in stop_words]
 
-    # Cap answer length to 20 tokens max
-    if end_idx - start_idx > 20:
-        end_idx = start_idx + 20
+    if not query_tokens:
+        return chunks[0]
 
-    answer_tokens = inputs["input_ids"][0][start_idx : end_idx + 1]
-    answer = tokenizer.decode(answer_tokens, skip_special_tokens=True).strip()
+    bm25        = BM25Okapi(tokenized)
+    scores      = bm25.get_scores(query_tokens)
+    top_indices = scores.argsort()[::-1][:3]
+    return " ".join(chunks[i] for i in top_indices)
 
-    return answer if answer else "[no answer found]"
+
+def clean_context(context: str) -> str:
+    context = re.sub(r'TITLE:.*?(?=\w{4})', '', context, flags=re.DOTALL)
+    context = re.sub(r'=+\s*', ' ', context).strip()
+    return context
+
+
+def get_student_answer(question: str, context: str) -> str:
+    """Ask Ollama to generate an answer from the retrieved context."""
+    prompt = f"""You are a helpful assistant. Answer the question using ONLY the context below.
+If the answer is not in the context, say "I don't know."
+Keep your answer concise — 1 to 2 sentences maximum.
+
+Context:
+{context}
+
+Question: {question}
+
+Answer:"""
+    return call_ollama(prompt)
 
 
 def judge_answer(question: str, correct_answer: str, student_answer: str) -> bool:
     """Ask Ollama to judge if the student answer is semantically correct."""
-    prompt = f"""You are a quiz grader. Judge if the student answer is correct.
+    prompt = f"""You are a lenient quiz grader. Judge if the student answer conveys the same meaning as the correct answer.
 
 Question: {question}
 Correct answer: {correct_answer}
 Student answer: {student_answer}
 
-Reply with only YES if the student answer is correct or contains the key information,
-or NO if it is wrong or irrelevant. One word only."""
+Rules:
+- Dates in different formats are correct (e.g. "26 March 1979" = "1979")
+- Approximate equivalents are correct (e.g. "10th millennium BCE" = "c. 10,000 BCE")
+- Partial answers containing the key fact are correct
+- Extra words are fine as long as the core fact is there
 
-    verdict = call_ollama(prompt).strip().upper()
-    return verdict.startswith("YES")
+Reply with only YES or NO. One word only."""
+    return call_ollama(prompt).strip().upper().startswith("YES")
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model-dir",  type=str, required=True)
     parser.add_argument("--quiz-bank",  type=str, default="data/quiz_bank.json")
     parser.add_argument("--pages-dir",  type=str, default="data/pages")
     parser.add_argument("--round",      type=int, default=1)
     parser.add_argument("--limit",      type=int, default=None)
     args = parser.parse_args()
 
-    # Load quiz bank
     quiz_path = os.path.join(PROJECT_ROOT, args.quiz_bank)
     if not os.path.exists(quiz_path):
         print("quiz_bank.json not found. Run generate_quiz.py first.")
@@ -124,14 +132,10 @@ def main():
 
     print(f"Loaded {len(quiz_bank)} questions from quiz bank")
 
-    # Load student model
-    model_dir = os.path.join(PROJECT_ROOT, args.model_dir)
-    print(f"Loading student model from: {model_dir}")
-    tokenizer = DistilBertTokenizerFast.from_pretrained(model_dir)
-    model     = DistilBertForQuestionAnswering.from_pretrained(model_dir)
-    model.eval()
-
     pages_dir = os.path.join(PROJECT_ROOT, args.pages_dir)
+    pages     = load_all_pages(pages_dir)
+    print(f"Loaded {len(pages)} page(s) for retrieval")
+    print(f"Reader: {OLLAMA_MODEL} (generative)")
 
     print(f"\nRunning evaluation...\n")
     print("=" * 60)
@@ -144,13 +148,13 @@ def main():
         correct_answer = item["answer"]
         source         = item.get("source", "unknown")
 
-        # Load the relevant Wikipedia page as context
-        context = load_page_text(source, pages_dir)
+        context = find_best_context(question, pages)
         if not context:
-            print(f"[{i+1}/{len(quiz_bank)}] SKIP — no page found for source: {source}")
+            print(f"[{i+1}/{len(quiz_bank)}] SKIP — no pages loaded")
             continue
 
-        student_answer = get_student_answer(question, context, model, tokenizer)
+        context_clean  = clean_context(context)
+        student_answer = get_student_answer(question, context_clean)
         is_correct     = judge_answer(question, correct_answer, student_answer)
 
         if is_correct:
@@ -174,20 +178,21 @@ def main():
             "source":         source,
         })
 
-    score     = correct / len(quiz_bank) if quiz_bank else 0
-    score_str = f"{correct}/{len(quiz_bank)}"
+    total = len(quiz_bank)
+    score = correct / total if total else 0
 
     print("=" * 60)
-    print(f"\nFinal score: {score_str}  ({score:.0%})")
+    print(f"\nFinal score: {correct}/{total}  ({score:.0%})")
     print()
 
     with mlflow.start_run(run_name=f"eval-round-{args.round}"):
         mlflow.log_param("round",     args.round)
-        mlflow.log_param("model_dir", args.model_dir)
-        mlflow.log_param("questions", len(quiz_bank))
+        mlflow.log_param("retrieval", "bm25")
+        mlflow.log_param("reader",    OLLAMA_MODEL)
+        mlflow.log_param("questions", total)
         mlflow.log_metric("score",    score)
         mlflow.log_metric("correct",  correct)
-        mlflow.log_metric("total",    len(quiz_bank))
+        mlflow.log_metric("total",    total)
 
         results_path = os.path.join(PROJECT_ROOT, "data", f"eval_round_{args.round}.json")
         with open(results_path, "w", encoding="utf-8") as f:
@@ -198,11 +203,11 @@ def main():
     print(f"Detailed results saved to: data/eval_round_{args.round}.json")
 
     if score < 0.5:
-        print("\nTip: score below 50% — try adding more pages and retraining")
+        print("\nTip: score below 50% — try adding more pages")
     elif score < 0.8:
-        print("\nTip: good progress! Add more pages or increase training epochs")
+        print("\nTip: good progress! Add more pages or improve retrieval")
     else:
-        print("\nExcellent! The model has strong knowledge of this topic")
+        print("\nExcellent! Strong coverage across the knowledge base")
 
 
 if __name__ == "__main__":

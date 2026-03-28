@@ -1,20 +1,24 @@
 import glob
 import os
-import torch
+import re
+import requests
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from transformers import DistilBertTokenizerFast, DistilBertForQuestionAnswering
+from rank_bm25 import BM25Okapi
 
 # ── serve.py ───────────────────────────────────────────────────────────────────
-# Serves the trained QA model via FastAPI on http://localhost:8000
+# RAG pipeline — BM25 retrieval + Ollama generative reader.
 #
-# The /ask endpoint takes a question, searches all pages in data/pages/
-# for the most relevant context, then uses the QA model to extract an answer.
+# For each question:
+#   1. BM25 finds the top 3 most relevant chunks from all ingested pages
+#   2. Ollama reads those chunks and generates a natural language answer
 #
-# This is extractive QA — the model finds and returns a span of text
-# from the Wikipedia pages it was trained on.
+# No DistilBERT, no span extraction — fully generative.
+
+OLLAMA_URL   = "http://localhost:11434/api/generate"
+OLLAMA_MODEL = "llama3.2:3b"
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -28,17 +32,9 @@ app.add_middleware(
 )
 
 
-def get_latest_model_dir() -> str:
-    pattern = os.path.join(PROJECT_ROOT, "models", "round_*")
-    dirs    = sorted(glob.glob(pattern))
-    if not dirs:
-        raise FileNotFoundError("No trained model found. Run train.py first.")
-    return dirs[-1]
-
-
 def load_pages() -> list[dict]:
-    """Load all Wikipedia pages from data/pages/"""
-    pages = []
+    """Load all pages from data/pages/."""
+    pages   = []
     pattern = os.path.join(PROJECT_ROOT, "data", "pages", "*.txt")
     for filepath in sorted(glob.glob(pattern)):
         with open(filepath, "r", encoding="utf-8") as f:
@@ -49,43 +45,71 @@ def load_pages() -> list[dict]:
 
 
 def find_best_context(question: str, pages: list[dict], chunk_words: int = 300) -> str:
-    """
-    Find the most relevant context passage for a question.
-    Simple keyword overlap scoring — finds the chunk with the most
-    question words in it.
-    """
+    """BM25 retrieval — returns top 3 chunks concatenated."""
     if not pages:
         return ""
 
-    question_words = set(question.lower().split())
-    best_chunk = ""
-    best_score = -1
+    stop_words = {"what", "is", "the", "a", "an", "of", "in", "was", "were",
+                  "how", "when", "where", "who", "why", "did", "do", "does",
+                  "that", "this", "which", "by", "at", "from", "with", "and",
+                  "or", "to", "for", "on", "are", "has", "had", "have", "be"}
 
+    chunks = []
     for page in pages:
         words = page["text"].split()
-        # Slide a window over the page
-        step = chunk_words // 2
+        step  = chunk_words // 2
         for i in range(0, len(words), step):
-            chunk = " ".join(words[i : i + chunk_words])
-            chunk_words_set = set(chunk.lower().split())
-            score = len(question_words & chunk_words_set)
-            if score > best_score:
-                best_score = score
-                best_chunk = chunk
+            chunks.append(" ".join(words[i : i + chunk_words]))
 
-    return best_chunk
+    if not chunks:
+        return ""
+
+    tokenized    = [[w for w in c.lower().split() if w not in stop_words] for c in chunks]
+    query_tokens = [w for w in question.lower().split() if w not in stop_words]
+
+    if not query_tokens:
+        return chunks[0]
+
+    bm25        = BM25Okapi(tokenized)
+    scores      = bm25.get_scores(query_tokens)
+    top_indices = scores.argsort()[::-1][:3]
+    return " ".join(chunks[i] for i in top_indices)
 
 
-# ── Load model and pages at startup ───────────────────────────────────────────
-model_dir = get_latest_model_dir()
-print(f"Loading model from: {model_dir}")
-tokenizer = DistilBertTokenizerFast.from_pretrained(model_dir)
-model     = DistilBertForQuestionAnswering.from_pretrained(model_dir)
-model.eval()
+def clean_context(context: str) -> str:
+    """Strip TITLE headers and === separators."""
+    context = re.sub(r'TITLE:.*?(?=\w{4})', '', context, flags=re.DOTALL)
+    context = re.sub(r'=+\s*', ' ', context).strip()
+    return context
 
+
+def call_ollama(question: str, context: str) -> str:
+    """Ask Ollama to generate an answer from the retrieved context."""
+    prompt = f"""You are a helpful assistant. Answer the question using ONLY the context below.
+If the answer is not in the context, say "I don't have information about that."
+Keep your answer concise — 1 to 3 sentences maximum.
+
+Context:
+{context}
+
+Question: {question}
+
+Answer:"""
+
+    payload = {
+        "model":  OLLAMA_MODEL,
+        "prompt": prompt,
+        "stream": False,
+    }
+    response = requests.post(OLLAMA_URL, json=payload, timeout=60)
+    response.raise_for_status()
+    return response.json()["response"].strip()
+
+
+# ── Load pages at startup ──────────────────────────────────────────────────────
 pages = load_pages()
-print(f"Loaded {len(pages)} Wikipedia page(s): {[p['title'] for p in pages]}")
-print("Model loaded. Server ready.")
+print(f"Loaded {len(pages)} page(s): {[p['title'] for p in pages]}")
+print("Server ready.")
 
 
 # ── Schemas ────────────────────────────────────────────────────────────────────
@@ -93,65 +117,43 @@ class AskRequest(BaseModel):
     question: str
 
 class AskResponse(BaseModel):
-    question:  str
-    answer:    str
-    context:   str
-    model_dir: str
+    question: str
+    answer:   str
+    context:  str
 
 
 # ── /ask endpoint ──────────────────────────────────────────────────────────────
 @app.post("/ask", response_model=AskResponse)
 def ask(req: AskRequest):
-    """
-    Answer a question using extractive QA.
-    Finds the best context passage from loaded pages, then extracts the answer.
-    """
     context = find_best_context(req.question, pages)
 
     if not context:
         return AskResponse(
             question=req.question,
-            answer="I don't have any pages loaded yet. Run the pipeline first.",
+            answer="No pages loaded. Run the pipeline first.",
             context="",
-            model_dir=model_dir,
         )
 
-    inputs = tokenizer(
-        req.question,
-        context,
-        return_tensors="pt",
-        truncation=True,
-        max_length=512,
-    )
+    context_clean = clean_context(context)
+    answer        = call_ollama(req.question, context_clean)
 
-    with torch.no_grad():
-        outputs = model(**inputs)
-
-    start_idx = outputs.start_logits.argmax()
-    end_idx   = outputs.end_logits.argmax()
-
-    if end_idx < start_idx:
-        end_idx = start_idx
-
-    answer_tokens = inputs["input_ids"][0][start_idx : end_idx + 1]
-    answer = tokenizer.decode(answer_tokens, skip_special_tokens=True).strip()
-
-    if not answer:
-        answer = "I couldn't find an answer in my knowledge base."
+    print(f"[ASK] Q: {req.question!r}")
+    print(f"[ASK] A: {answer!r}")
 
     return AskResponse(
         question=req.question,
         answer=answer,
-        context=context[:300] + "...",
-        model_dir=model_dir,
+        context=context_clean[:300] + "...",
     )
 
 
 @app.get("/health")
 def health():
     return {
-        "status": "ok",
-        "model_dir": model_dir,
+        "status":       "ok",
+        "mode":         "rag-generative",
+        "retrieval":    "bm25",
+        "reader":       OLLAMA_MODEL,
         "pages_loaded": [p["title"] for p in pages],
     }
 

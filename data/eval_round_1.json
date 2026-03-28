@@ -1,36 +1,36 @@
 [
   {
-    "question": "The name Israel is derived from which patriarch?",
+    "question": "Which country occupies the West Bank and the Gaza Strip?",
+    "correct_answer": "Israel",
+    "student_answer": "israel",
+    "is_correct": true,
+    "source": "Israel"
+  },
+  {
+    "question": "When did Israel declare independence as the British Mandate ended?",
+    "correct_answer": "14 May 1948",
+    "student_answer": "14 may 1948",
+    "is_correct": true,
+    "source": "Israel"
+  },
+  {
+    "question": "What is the name of the patriarch after whom the word Israel refers, according to the Hebrew Bible?",
     "correct_answer": "Jacob",
-    "student_answer": "title : israel = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = israel, officially the state of israel, is a country in the southern levant region of west asia. it is bordered by lebanon to the north, syria to the northeast, jordan to the east, and egypt to the southwest. israel occupies the west bank and the gaza strip of the palestinian territories, as well as the syrian golan heights. israel ' s western coast lies on the mediterranean sea, its southern tip reaching the red sea, and the east includes the earth ' s lowest point near the dead sea",
+    "student_answer": "[no answer found]",
     "is_correct": false,
     "source": "Israel"
   },
   {
-    "question": "The region was known as Palestine under the British Mandate",
-    "correct_answer": "1920–1948",
-    "student_answer": "the region was known as palestine under the british mandate title : israel = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = israel, officially the state of israel, is a country in the southern levant region of west asia. it is bordered by lebanon to the north, syria to the northeast, jordan to the east, and egypt to the southwest. israel occupies the west bank and the gaza strip of the palestinian territories, as well as the syrian golan heights. israel ' s western coast lies on the mediterranean sea, its southern tip reaching the red sea, and the east includes the earth ' s lowest point near the dead sea",
+    "question": "Who suggested the name 'Israel' for the new country?",
+    "correct_answer": "David Ben-Gurion",
+    "student_answer": "the state of israel",
     "is_correct": false,
     "source": "Israel"
   },
   {
-    "question": "The 2020 Abraham Accords normalised ties with more Arab states, but the Israeli–Palestinian conflict persists",
-    "correct_answer": "Israel and several other countries, including the United States, reject that Israel's actions constitute genocide.",
-    "student_answer": "the 2020 abraham accords normalised ties with more arab states, but the israeli – palestinian conflict persists",
-    "is_correct": true,
-    "source": "Israel"
-  },
-  {
-    "question": "The earliest known archaeological artefact to mention the word Israel as a collective is the Merneptah Stele of ancient Egypt",
-    "correct_answer": "dated to the late-13th century BCE",
-    "student_answer": "the earliest known archaeological artefact to mention the word israel as a collective is the merneptah stele of ancient",
-    "is_correct": true,
-    "source": "Israel"
-  },
-  {
-    "question": "The name State of Israel was formally adopted in 1948",
-    "correct_answer": "upon establishment",
-    "student_answer": "the name state of israel was formally adopted in 1948 title : israel = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = israel, officially the state of israel, is a country in the southern levant region of west asia. it is bordered by lebanon to the north, syria to the northeast, jordan to the east, and egypt to the southwest. israel occupies the west bank and the gaza strip of the palestinian territories, as well as the syrian golan heights. israel ' s western coast lies on the mediterranean sea, its southern tip reaching the red sea, and the east includes the earth ' s lowest point near the dead sea",
+    "question": "When did the Sinai return to Egypt?",
+    "correct_answer": "1982",
+    "student_answer": "1982",
     "is_correct": true,
     "source": "Israel"
   }

@@ -80,7 +80,7 @@ def restart_server():
 
 def main():
     parser = argparse.ArgumentParser(description="Knowledge Trainer Pipeline")
-    parser.add_argument("--url",   type=str, required=True,  help="Wikipedia URL to ingest")
+    parser.add_argument("--url",   type=str, nargs="+", required=True,  help="One or more URLs to ingest")
     parser.add_argument("--round", type=int, required=True,  help="Round number")
     parser.add_argument("--epochs",      type=int, default=3)
     parser.add_argument("--batch-size",  type=int, default=4)
@@ -102,18 +102,24 @@ def main():
     print_manifest_summary(PROJECT_ROOT)
 
     # ── Step 1: Ingest ─────────────────────────────────────────────────────────
-    ok = run_step("Step 1/4  Ingesting Wikipedia page", [
-        sys.executable, os.path.join(SRC_DIR, "ingest.py"),
-        "--url", args.url,
-    ])
-    if not ok:
-        return
+    for i, url in enumerate(args.url, 1):
+        ok = run_step(f"Step 1/4  Ingesting page {i}/{len(args.url)}", [
+            sys.executable, os.path.join(SRC_DIR, "ingest.py"),
+            "--url", url,
+        ])
+        if not ok:
+            return
 
     # ── Step 2: Generate quiz ──────────────────────────────────────────────────
-    ok = run_step("Step 2/4  Generating quiz questions (Ollama)", [
+    quiz_path = os.path.join(PROJECT_ROOT, "data", "quiz_bank.json")
+    quiz_cmd  = [
         sys.executable, os.path.join(SRC_DIR, "generate_quiz.py"),
         "--questions-per-page", str(args.questions),
-    ])
+    ]
+    if not os.path.exists(quiz_path):
+        quiz_cmd.append("--regenerate")
+
+    ok = run_step("Step 2/4  Generating quiz questions (Ollama)", quiz_cmd)
     if not ok:
         return
 
@@ -130,8 +136,7 @@ def main():
     # ── Step 4: Evaluate ───────────────────────────────────────────────────────
     ok = run_step("Step 4/4  Evaluating student model", [
         sys.executable, os.path.join(SRC_DIR, "evaluate.py"),
-        "--model-dir", model_dir,
-        "--round",     str(args.round),
+        "--round", str(args.round),
     ])
     if not ok:
         return
@@ -164,7 +169,14 @@ def main():
     # ── Results summary ────────────────────────────────────────────────────────
     print(f"\n{'=' * 50}")
     print(f"  Results — v{next_version}")
-    print(f"  New score:  {new_score:.0%}  ({int(new_score * 5)}/5)")
+     # Read actual question count from eval results
+    results_path = os.path.join(PROJECT_ROOT, "data", f"eval_round_{args.round}.json")
+    with open(results_path, "r", encoding="utf-8") as f:
+        results = json.load(f)
+    total_questions = len(results)
+    correct_count   = int(new_score * total_questions)
+
+    print(f"  New score:  {new_score:.0%}  ({correct_count}/{total_questions})")
     print(f"{'=' * 50}")
 
     # ── Evaluation gate ────────────────────────────────────────────────────────

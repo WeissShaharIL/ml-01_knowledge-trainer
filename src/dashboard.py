@@ -76,12 +76,18 @@ def kill_serve():
 def start_serve(version: str):
     """Start serve.py as a background process."""
     global serve_process, serve_status
+    logs_dir = os.path.join(PROJECT_ROOT, "logs")
+    os.makedirs(logs_dir, exist_ok=True)
+    log_file = open(os.path.join(logs_dir, "serve.log"), "a", encoding="utf-8")
+    log_file.write(f"\n\n{'='*60}\nStarted at {time.strftime('%Y-%m-%d %H:%M:%S')}\n{'='*60}\n")
+    log_file.flush()
+
     serve_py = os.path.join(SRC_DIR, "serve.py")
     serve_process = subprocess.Popen(
         [sys.executable, serve_py],
         cwd=PROJECT_ROOT,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=log_file,
+        stderr=log_file,
     )
     serve_status = {
         "state":      "running",

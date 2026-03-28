@@ -4,6 +4,48 @@
     "url": "https://en.wikipedia.org/wiki/Israel",
     "word_count": 14961,
     "filepath": "C:\\Users\\shahar\\mlops\\ml-01_knowledge-trainer\\data/pages\\Israel.txt",
-    "fetched_at": "2026-03-28T14:54:33.288500"
+    "fetched_at": "2026-03-28T19:35:45.791566"
+  },
+  "History of Israel": {
+    "title": "History of Israel",
+    "url": "https://en.wikipedia.org/wiki/History_of_Israel",
+    "word_count": 11218,
+    "filepath": "C:\\Users\\shahar\\mlops\\ml-01_knowledge-trainer\\data/pages\\History_of_Israel.txt",
+    "fetched_at": "2026-03-28T19:56:00.657012"
+  },
+  "Jerusalem": {
+    "title": "Jerusalem",
+    "url": "https://en.wikipedia.org/wiki/Jerusalem",
+    "word_count": 11263,
+    "filepath": "C:\\Users\\shahar\\mlops\\ml-01_knowledge-trainer\\data/pages\\Jerusalem.txt",
+    "fetched_at": "2026-03-28T19:59:38.451071"
+  },
+  "1948 Arab–Israeli War": {
+    "title": "1948 Arab–Israeli War",
+    "url": "https://en.wikipedia.org/wiki/1948_Arab%E2%80%93Israeli_War",
+    "word_count": 22405,
+    "filepath": "C:\\Users\\shahar\\mlops\\ml-01_knowledge-trainer\\data/pages\\1948_Arab–Israeli_War.txt",
+    "fetched_at": "2026-03-28T20:04:16.475555"
+  },
+  "Egypt–Israel peace treaty": {
+    "title": "Egypt–Israel peace treaty",
+    "url": "https://en.wikipedia.org/wiki/Egypt%E2%80%93Israel_peace_treaty",
+    "word_count": 1505,
+    "filepath": "C:\\Users\\shahar\\mlops\\ml-01_knowledge-trainer\\data/pages\\Egypt–Israel_peace_treaty.txt",
+    "fetched_at": "2026-03-28T20:04:17.668690"
+  },
+  "Muslim conquest of Syria": {
+    "title": "Muslim conquest of Syria",
+    "url": "https://en.wikipedia.org/wiki/Muslim_conquest_of_the_Levant",
+    "word_count": 6862,
+    "filepath": "C:\\Users\\shahar\\mlops\\ml-01_knowledge-trainer\\data/pages\\Muslim_conquest_of_Syria.txt",
+    "fetched_at": "2026-03-28T20:04:18.819313"
+  },
+  "Six-Day War": {
+    "title": "Six-Day War",
+    "url": "https://en.wikipedia.org/wiki/Six-Day_War",
+    "word_count": 14842,
+    "filepath": "C:\\Users\\shahar\\mlops\\ml-01_knowledge-trainer\\data/pages\\Six-Day_War.txt",
+    "fetched_at": "2026-03-28T20:04:20.214310"
   }
 }

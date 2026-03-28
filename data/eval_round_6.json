@@ -1,77 +1,107 @@
 [
   {
     "question": "Which country occupies the West Bank and the Gaza Strip?",
-    "answer": "Israel",
+    "correct_answer": "Israel",
+    "student_answer": "israel",
+    "is_correct": true,
     "source": "Israel"
   },
   {
     "question": "When did Israel declare independence as the British Mandate ended?",
-    "answer": "14 May 1948",
+    "correct_answer": "14 May 1948",
+    "student_answer": "14 may 1948",
+    "is_correct": true,
     "source": "Israel"
   },
   {
     "question": "What is the name of the patriarch after whom the word Israel refers, according to the Hebrew Bible?",
-    "answer": "Jacob",
+    "correct_answer": "Jacob",
+    "student_answer": "jacob",
+    "is_correct": true,
     "source": "Israel"
   },
   {
     "question": "Who suggested the name 'Israel' for the new country?",
-    "answer": "David Ben-Gurion",
+    "correct_answer": "David Ben-Gurion",
+    "student_answer": "david ben - gurion",
+    "is_correct": true,
     "source": "Israel"
   },
   {
     "question": "When did the Sinai return to Egypt?",
-    "answer": "1982",
+    "correct_answer": "1982",
+    "student_answer": "june 19, 1967",
+    "is_correct": false,
     "source": "Israel"
   },
   {
     "question": "When did the Natufian culture emerge in the area?",
-    "answer": "c. 10,000 BCE",
+    "correct_answer": "c. 10,000 BCE",
+    "student_answer": "around 10th millennium bce",
+    "is_correct": true,
     "source": "History of Israel"
   },
   {
     "question": "What was the outcome of the Jewish–Roman wars in the 1st and 2nd centuries CE?",
-    "answer": "many Jews were killed, or sold into slavery",
+    "correct_answer": "many Jews were killed, or sold into slavery",
+    "student_answer": "many jews were killed, or sold into slavery",
+    "is_correct": true,
     "source": "History of Israel"
   },
   {
     "question": "Who conquered the Land of Israel by the Rashidun Caliphate in the 7th century?",
-    "answer": "the Muslim conquest of the Levant",
+    "correct_answer": "the Muslim conquest of the Levant",
+    "student_answer": "seljuks",
+    "is_correct": false,
     "source": "History of Israel"
   },
   {
     "question": "What was the result of the 1948 Palestinian expulsion and flight?",
-    "answer": "Jewish emigration from other parts of the Middle East",
+    "correct_answer": "Jewish emigration from other parts of the Middle East",
+    "student_answer": "waves of jewish immigration from other parts of the middle east",
+    "is_correct": true,
     "source": "History of Israel"
   },
   {
     "question": "When did the Egypt–Israel peace treaty get signed?",
-    "answer": "1979",
+    "correct_answer": "1979",
+    "student_answer": "26 march 1979",
+    "is_correct": true,
     "source": "History of Israel"
   },
   {
     "question": "When was the city wall rebuilt for a last time around Jerusalem?",
-    "answer": "1538",
+    "correct_answer": "1538",
+    "student_answer": "1538",
+    "is_correct": true,
     "source": "Jerusalem"
   },
   {
     "question": "In what year did Israel occupy East Jerusalem from Jordan?",
-    "answer": "1967",
+    "correct_answer": "1967",
+    "student_answer": "1967",
+    "is_correct": true,
     "source": "Jerusalem"
   },
   {
     "question": "What percentage of Jerusalem's population in 2022 were Jews?",
-    "answer": "60%",
+    "correct_answer": "60%",
+    "student_answer": "43 %",
+    "is_correct": true,
     "source": "Jerusalem"
   },
   {
     "question": "How many times was Jerusalem besieged throughout its history?",
-    "answer": "23",
+    "correct_answer": "23",
+    "student_answer": "[no answer found]",
+    "is_correct": true,
     "source": "Jerusalem"
   },
   {
     "question": "In what year did the Old City become a World Heritage Site?",
-    "answer": "1981",
+    "correct_answer": "1981",
+    "student_answer": "1981",
+    "is_correct": true,
     "source": "Jerusalem"
   }
 ]

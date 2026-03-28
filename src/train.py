@@ -1,206 +1,131 @@
 import glob
 import os
 import sys
+import json
+import re
 import mlflow
-import mlflow.pytorch
 import argparse
-from transformers import (
-    DistilBertTokenizerFast,
-    DistilBertForQuestionAnswering,
-    Trainer,
-    TrainingArguments,
-)
-from datasets import Dataset
 import torch
+from transformers import DistilBertTokenizerFast, DistilBertForQuestionAnswering
+from rank_bm25 import BM25Okapi
 
 # ── train.py ───────────────────────────────────────────────────────────────────
-# Fine-tunes distilbert-base-uncased-distilled-squad on all pages in data/pages/
-# using Question Answering (extractive QA).
-#
-# Hardware (CPU vs GPU) is controlled by config.yaml — no code changes needed.
+# RAG mode — base model is frozen, no weights are updated.
+# "Training" benchmarks BM25 retrieval quality on the current quiz bank
+# and logs metrics to MLflow.
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC_DIR      = os.path.join(PROJECT_ROOT, "src")
 sys.path.insert(0, SRC_DIR)
-
-from config import load_config, resolve_device
 
 MLFLOW_DIR = os.path.join(PROJECT_ROOT, "mlruns")
 mlflow.set_tracking_uri(f"file:///{MLFLOW_DIR}")
 mlflow.set_experiment("knowledge-trainer")
 
 
-def load_pages(pages_dir: str):
+def load_pages(pages_dir: str) -> list[dict]:
     pattern = os.path.join(pages_dir, "*.txt")
-    files   = sorted(glob.glob(pattern))
-    texts   = []
-    for f in files:
-        with open(f, "r", encoding="utf-8") as fh:
-            texts.append(fh.read())
-    return texts, files
+    pages   = []
+    for filepath in sorted(glob.glob(pattern)):
+        with open(filepath, "r", encoding="utf-8") as f:
+            text = f.read()
+        title = os.path.basename(filepath).replace(".txt", "").replace("_", " ")
+        pages.append({"title": title, "text": text})
+    return pages
 
 
-def build_qa_dataset(texts: list[str], tokenizer, chunk_size: int = 400) -> Dataset:
-    examples = []
+def find_best_context(question: str, pages: list[dict], chunk_words: int = 300) -> str:
+    """BM25 retrieval over all chunks from all pages."""
+    if not pages:
+        return ""
 
-    for text in texts:
-        sentences = [s.strip() for s in text.replace("\n", " ").split(". ") if len(s.strip()) > 20]
+    stop_words = {"what", "is", "the", "a", "an", "of", "in", "was", "were",
+                  "how", "when", "where", "who", "why", "did", "do", "does",
+                  "that", "this", "which", "by", "at", "from", "with", "and",
+                  "or", "to", "for", "on", "are", "has", "had", "have", "be"}
 
-        for i in range(0, len(sentences) - 2, 3):
-            context     = ". ".join(sentences[i:i+3]) + "."
-            if len(context) < 50:
-                continue
+    chunks = []
+    for page in pages:
+        words = page["text"].split()
+        step  = chunk_words // 2
+        for i in range(0, len(words), step):
+            chunks.append(" ".join(words[i : i + chunk_words]))
 
-            answer_text = sentences[i][:100].strip()
-            if not answer_text:
-                continue
+    if not chunks:
+        return ""
 
-            answer_start = context.find(answer_text)
-            if answer_start == -1:
-                continue
+    tokenized    = [[w for w in c.lower().split() if w not in stop_words] for c in chunks]
+    query_tokens = [w for w in question.lower().split() if w not in stop_words]
 
-            examples.append({
-                "question":     "What does this text say?",
-                "context":      context,
-                "answer_text":  answer_text,
-                "answer_start": answer_start,
-            })
+    if not query_tokens:
+        return chunks[0]
 
-    if not examples:
-        return None
-
-    def tokenize_fn(example):
-        encoding = tokenizer(
-            example["question"],
-            example["context"],
-            truncation=True,
-            max_length=512,
-            padding="max_length",
-        )
-
-        start_char  = example["answer_start"]
-        end_char    = start_char + len(example["answer_text"])
-        token_start = encoding.char_to_token(start_char, sequence_index=1)
-        token_end   = encoding.char_to_token(end_char - 1, sequence_index=1)
-
-        if token_start is None:
-            token_start = 0
-        if token_end is None:
-            token_end = 0
-
-        encoding["start_positions"] = token_start
-        encoding["end_positions"]   = token_end
-        return encoding
-
-    dataset = Dataset.from_list(examples)
-    dataset = dataset.map(tokenize_fn, remove_columns=["question", "context", "answer_text", "answer_start"])
-    return dataset
+    bm25     = BM25Okapi(tokenized)
+    scores   = bm25.get_scores(query_tokens)
+    best_idx = int(scores.argmax())
+    return chunks[best_idx]
 
 
-def main(round_num: int, epochs: int, batch_size: int):
+def benchmark_retrieval(pages: list[dict], quiz_bank: list[dict]) -> dict:
+    """Check if correct answer appears in BM25-retrieved context."""
+    if not quiz_bank:
+        return {"retrieval_hit_rate": 0.0, "questions": 0}
 
-    # ── Load config ────────────────────────────────────────────────────────────
-    cfg        = load_config()
-    device     = resolve_device(cfg.get("hardware", {}).get("device", "cpu"))
-    MODEL_NAME = cfg.get("training", {}).get("base_model", "distilbert-base-uncased-distilled-squad")
+    hits = 0
+    for item in quiz_bank:
+        question       = item["question"]
+        correct_answer = item["answer"].lower()
+        context        = find_best_context(question, pages)
 
-    # Allow CLI args to override config (pipeline.py passes these)
-    train_cfg  = cfg.get("training", {})
-    epochs     = epochs     or train_cfg.get("epochs", 3)
-    batch_size = batch_size or train_cfg.get("batch_size", 4)
+        if not context:
+            continue
 
-    use_cpu    = (device == "cpu")
+        context = re.sub(r'TITLE:.*?(?=\w{4})', '', context, flags=re.DOTALL)
+        context = re.sub(r'=+\s*', ' ', context).strip()
 
-    pages_dir  = os.path.join(PROJECT_ROOT, "data", "pages")
-    output_dir = os.path.join(PROJECT_ROOT, "models", f"round_{round_num}")
+        if correct_answer in context.lower():
+            hits += 1
 
-    texts, files = load_pages(pages_dir)
+    hit_rate = hits / len(quiz_bank)
+    return {"retrieval_hit_rate": hit_rate, "questions": len(quiz_bank)}
 
-    print(f"\nLoading tokenizer and model: {MODEL_NAME}")
-    tokenizer = DistilBertTokenizerFast.from_pretrained(MODEL_NAME)
-    model     = DistilBertForQuestionAnswering.from_pretrained(MODEL_NAME)
 
-    if not use_cpu:
-        model = model.to(device)
+def main(round_num: int, epochs: int = None, batch_size: int = None):
+    pages_dir = os.path.join(PROJECT_ROOT, "data", "pages")
+    quiz_path = os.path.join(PROJECT_ROOT, "data", "quiz_bank.json")
+    pages     = load_pages(pages_dir)
 
-    # ── Baseline mode ──────────────────────────────────────────────────────────
-    if not texts:
-        print("\nNo pages found in data/pages/ — saving raw pretrained baseline.")
-        print("This is Round 0 — the model knows English but nothing about your topic.\n")
+    base_dir = os.path.join(PROJECT_ROOT, "models", "base")
+    if not os.path.exists(base_dir):
+        raise FileNotFoundError("models/base not found. Run: python src/setup.py")
 
-        os.makedirs(output_dir, exist_ok=True)
-        model.save_pretrained(output_dir)
-        tokenizer.save_pretrained(output_dir)
+    print(f"\nRound {round_num} — RAG mode (frozen base model, BM25 retrieval)")
+    print(f"Pages loaded: {len(pages)}")
+    for p in pages:
+        print(f"  {p['title']}")
 
-        run_name = f"round-{round_num}-baseline-0pages"
-        with mlflow.start_run(run_name=run_name):
-            mlflow.log_param("round",    round_num)
-            mlflow.log_param("pages",    0)
-            mlflow.log_param("model",    MODEL_NAME)
-            mlflow.log_param("device",   device)
-            mlflow.log_param("baseline", True)
-            mlflow.log_metric("train_loss", 0)
+    quiz_bank = []
+    if os.path.exists(quiz_path):
+        with open(quiz_path, "r", encoding="utf-8") as f:
+            quiz_bank = json.load(f)
 
-        print(f"Baseline model saved to: {output_dir}")
-        print(f"MLflow run: {run_name}")
-        return
+    print(f"\nBenchmarking BM25 retrieval on {len(quiz_bank)} questions...")
+    metrics  = benchmark_retrieval(pages, quiz_bank)
+    hit_rate = metrics["retrieval_hit_rate"]
+    hits     = int(hit_rate * len(quiz_bank))
+    print(f"Retrieval hit rate: {hit_rate:.0%} ({hits}/{len(quiz_bank)} answers found in context)")
 
-    # ── Normal training ────────────────────────────────────────────────────────
-    print(f"\nRound {round_num} — training on {len(texts)} page(s)")
-    for f in files:
-        print(f"  {os.path.basename(f)}")
-
-    dataset = build_qa_dataset(texts, tokenizer)
-    if dataset is None or len(dataset) == 0:
-        print("Could not build QA dataset from pages.")
-        return
-
-    print(f"Created {len(dataset)} QA training examples")
-
-    training_args = TrainingArguments(
-        output_dir=output_dir,
-        num_train_epochs=epochs,
-        per_device_train_batch_size=batch_size,
-        save_strategy="no",
-        logging_steps=10,
-        report_to="none",
-        use_cpu=use_cpu,
-    )
-
-    trainer = Trainer(
-        model=model,
-        args=training_args,
-        train_dataset=dataset,
-        processing_class=tokenizer,
-    )
-
-    run_name = f"round-{round_num}-{len(texts)}pages-{epochs}epochs"
-    print(f"\nStarting run: {run_name}")
-    print(f"Training on {device.upper()} — {'this will take a few minutes' if use_cpu else 'GPU engaged!'}...\n")
-
+    run_name = f"round-{round_num}-{len(pages)}pages-bm25"
     with mlflow.start_run(run_name=run_name):
         mlflow.log_param("round",      round_num)
-        mlflow.log_param("pages",      len(texts))
-        mlflow.log_param("examples",   len(dataset))
-        mlflow.log_param("epochs",     epochs)
-        mlflow.log_param("batch_size", batch_size)
-        mlflow.log_param("model",      MODEL_NAME)
-        mlflow.log_param("device",     device)
+        mlflow.log_param("pages",      len(pages))
+        mlflow.log_param("retrieval",  "bm25")
+        mlflow.log_param("questions",  len(quiz_bank))
+        mlflow.log_metric("train_loss",         0.0)
+        mlflow.log_metric("retrieval_hit_rate", hit_rate)
 
-        result     = trainer.train()
-        train_loss = result.training_loss
-        mlflow.log_metric("train_loss", train_loss)
-        mlflow.pytorch.log_model(model, name="student-model")
-
-        model.save_pretrained(output_dir)
-        tokenizer.save_pretrained(output_dir)
-
-        print(f"\n── Round {round_num} complete ────────────────────────────")
-        print(f"Pages        : {len(texts)}")
-        print(f"Device       : {device.upper()}")
-        print(f"Training loss: {train_loss:.4f}")
-        print(f"Model saved  : {output_dir}")
-        print(f"MLflow run   : {run_name}")
+    print(f"MLflow run logged: {run_name}")
+    print(f"Model: models/base (frozen)")
 
 
 if __name__ == "__main__":
