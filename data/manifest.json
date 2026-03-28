@@ -1,0 +1,24 @@
+{
+  "current_version": "1.0.0",
+  "production_version": "1.0.0",
+  "versions": {
+    "1.0.0": {
+      "version": "1.0.0",
+      "round": 1,
+      "pages": [
+        "Israel"
+      ],
+      "urls": [
+        "https://en.wikipedia.org/wiki/Israel"
+      ],
+      "word_counts": {
+        "Israel": 14961
+      },
+      "model_dir": "models/round_1",
+      "score": 0.6,
+      "status": "production",
+      "mlflow_run_id": null,
+      "created_at": "2026-03-28T15:17:05.714572"
+    }
+  }
+}

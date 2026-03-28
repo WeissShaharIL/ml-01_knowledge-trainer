@@ -1,25 +1,20 @@
+import glob
 import os
 import torch
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from transformers import DistilBertTokenizerFast, DistilBertForMaskedLM
-import glob
+from transformers import DistilBertTokenizerFast, DistilBertForQuestionAnswering
 
 # ── serve.py ───────────────────────────────────────────────────────────────────
-# Phase 2 — Model serving layer.
-# Starts a FastAPI server on http://localhost:8000 that loads the latest
-# trained student model and answers questions via a /ask endpoint.
+# Serves the trained QA model via FastAPI on http://localhost:8000
 #
-# Why FastAPI?
-# It's the standard for ML model serving in Python — fast, minimal boilerplate,
-# automatic API docs at /docs, and plays nicely with the transformers library.
+# The /ask endpoint takes a question, searches all pages in data/pages/
+# for the most relevant context, then uses the QA model to extract an answer.
 #
-# The server always loads the LATEST trained model from the models/ directory.
-# When you retrain and restart the server, it automatically picks up the new
-# version — no code change needed. This is the serving layer pattern used in
-# production ML systems.
+# This is extractive QA — the model finds and returns a span of text
+# from the Wikipedia pages it was trained on.
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -32,72 +27,141 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Load the latest trained model ─────────────────────────────────────────────
+
 def get_latest_model_dir() -> str:
-    """Find the most recently trained model in models/"""
     pattern = os.path.join(PROJECT_ROOT, "models", "round_*")
     dirs    = sorted(glob.glob(pattern))
     if not dirs:
-        raise FileNotFoundError(
-            "No trained model found. Run train.py first."
-        )
-    return dirs[-1]  # latest round
+        raise FileNotFoundError("No trained model found. Run train.py first.")
+    return dirs[-1]
 
+
+def load_pages() -> list[dict]:
+    """Load all Wikipedia pages from data/pages/"""
+    pages = []
+    pattern = os.path.join(PROJECT_ROOT, "data", "pages", "*.txt")
+    for filepath in sorted(glob.glob(pattern)):
+        with open(filepath, "r", encoding="utf-8") as f:
+            text = f.read()
+        title = os.path.basename(filepath).replace(".txt", "").replace("_", " ")
+        pages.append({"title": title, "text": text, "path": filepath})
+    return pages
+
+
+def find_best_context(question: str, pages: list[dict], chunk_words: int = 300) -> str:
+    """
+    Find the most relevant context passage for a question.
+    Simple keyword overlap scoring — finds the chunk with the most
+    question words in it.
+    """
+    if not pages:
+        return ""
+
+    question_words = set(question.lower().split())
+    best_chunk = ""
+    best_score = -1
+
+    for page in pages:
+        words = page["text"].split()
+        # Slide a window over the page
+        step = chunk_words // 2
+        for i in range(0, len(words), step):
+            chunk = " ".join(words[i : i + chunk_words])
+            chunk_words_set = set(chunk.lower().split())
+            score = len(question_words & chunk_words_set)
+            if score > best_score:
+                best_score = score
+                best_chunk = chunk
+
+    return best_chunk
+
+
+# ── Load model and pages at startup ───────────────────────────────────────────
 model_dir = get_latest_model_dir()
 print(f"Loading model from: {model_dir}")
 tokenizer = DistilBertTokenizerFast.from_pretrained(model_dir)
-model     = DistilBertForMaskedLM.from_pretrained(model_dir)
+model     = DistilBertForQuestionAnswering.from_pretrained(model_dir)
 model.eval()
+
+pages = load_pages()
+print(f"Loaded {len(pages)} Wikipedia page(s): {[p['title'] for p in pages]}")
 print("Model loaded. Server ready.")
 
-# ── Request / response schemas ─────────────────────────────────────────────────
+
+# ── Schemas ────────────────────────────────────────────────────────────────────
 class AskRequest(BaseModel):
     question: str
 
 class AskResponse(BaseModel):
-    question:    str
-    answer:      str
-    top_answers: list[str]
-    model_dir:   str
+    question:  str
+    answer:    str
+    context:   str
+    model_dir: str
+
 
 # ── /ask endpoint ──────────────────────────────────────────────────────────────
 @app.post("/ask", response_model=AskResponse)
 def ask(req: AskRequest):
     """
-    Ask the student model a question.
-    Uses masked language modeling — appends [MASK] and predicts the missing word.
-    Returns top 5 predictions so you can see what the model is considering.
+    Answer a question using extractive QA.
+    Finds the best context passage from loaded pages, then extracts the answer.
     """
-    masked_input = f"Question: {req.question} Answer: [MASK]"
+    context = find_best_context(req.question, pages)
 
-    inputs   = tokenizer(masked_input, return_tensors="pt", truncation=True, max_length=512)
-    mask_idx = (inputs["input_ids"] == tokenizer.mask_token_id).nonzero(as_tuple=True)[1]
+    if not context:
+        return AskResponse(
+            question=req.question,
+            answer="I don't have any pages loaded yet. Run the pipeline first.",
+            context="",
+            model_dir=model_dir,
+        )
+
+    inputs = tokenizer(
+        req.question,
+        context,
+        return_tensors="pt",
+        truncation=True,
+        max_length=512,
+    )
 
     with torch.no_grad():
         outputs = model(**inputs)
 
-    logits       = outputs.logits[0, mask_idx, :]
-    top_ids      = logits.topk(5).indices[0].tolist()
-    top_answers  = [tokenizer.decode([tid]).strip() for tid in top_ids]
+    start_idx = outputs.start_logits.argmax()
+    end_idx   = outputs.end_logits.argmax()
+
+    if end_idx < start_idx:
+        end_idx = start_idx
+
+    answer_tokens = inputs["input_ids"][0][start_idx : end_idx + 1]
+    answer = tokenizer.decode(answer_tokens, skip_special_tokens=True).strip()
+
+    if not answer:
+        answer = "I couldn't find an answer in my knowledge base."
 
     return AskResponse(
         question=req.question,
-        answer=top_answers[0],
-        top_answers=top_answers,
+        answer=answer,
+        context=context[:300] + "...",
         model_dir=model_dir,
     )
 
-# ── /health endpoint ───────────────────────────────────────────────────────────
+
 @app.get("/health")
 def health():
-    return {"status": "ok", "model_dir": model_dir}
+    return {
+        "status": "ok",
+        "model_dir": model_dir,
+        "pages_loaded": [p["title"] for p in pages],
+    }
 
-# ── /chat endpoint — serves the chat UI ───────────────────────────────────────
+
 @app.get("/chat", response_class=HTMLResponse)
 def chat():
     chat_path = os.path.join(PROJECT_ROOT, "src", "chat.html")
     with open(chat_path, "r", encoding="utf-8") as f:
         return f.read()
+
 
 if __name__ == "__main__":
     import uvicorn

@@ -48,7 +48,7 @@ def call_ollama(prompt: str) -> str:
         "prompt": prompt,
         "stream": False,  # wait for full response before returning
     }
-    response = requests.post(OLLAMA_URL, json=payload, timeout=120)
+    response = requests.post(OLLAMA_URL, json=payload, timeout=300)
     response.raise_for_status()
     return response.json()["response"]
 
@@ -78,9 +78,9 @@ def generate_questions_for_page(filepath: str, n_questions: int) -> list:
     with open(filepath, "r", encoding="utf-8") as f:
         content = f.read()
 
-    # Use only the first 3000 words — Ollama has a context limit and
+    # Use only the first 1000 words — Ollama has a context limit and
     # the opening of a Wikipedia article is the most information-dense part
-    words = content.split()[:3000]
+    words = content.split()[:1000]
     text  = " ".join(words)
 
     # Extract title from the first line (we write "TITLE: ..." in ingest.py)

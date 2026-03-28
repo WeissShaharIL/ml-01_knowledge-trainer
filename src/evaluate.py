@@ -1,27 +1,25 @@
 import argparse
+import glob
 import json
 import os
 import requests
 import torch
-from transformers import DistilBertTokenizerFast, DistilBertForMaskedLM
+from transformers import DistilBertTokenizerFast, DistilBertForQuestionAnswering
 import mlflow
 
 # ── evaluate.py ────────────────────────────────────────────────────────────────
 # Step 4 of the knowledge trainer pipeline.
 # Loads the trained student model and quizzes it using questions from
-# quiz_bank.json. Prints a score and logs it to MLflow.
+# quiz_bank.json.
 #
-# How evaluation works:
-# For each question in the quiz bank we ask BOTH the student model AND Ollama.
-# - Ollama gives us the "gold standard" answer (it can read the question and reason)
-# - The student model gives us a fill-in-the-blank style answer via MLM
-# - We then ask Ollama to judge whether the student's answer is correct
+# How evaluation works (extractive QA):
+# For each question we find the relevant Wikipedia page (by source tag),
+# load it as context, and ask the QA model to extract the answer span.
+# This is exactly how models like BERT are used in production QA systems.
 #
-# Why use Ollama as the judge?
-# Exact string matching fails for natural language — "Alan Turing" and
-# "Turing" are the same answer but wouldn't match. Ollama can judge semantic
-# equivalence the way a human grader would. This is called LLM-as-a-judge
-# and is a standard evaluation pattern in modern MLOps.
+# We then use Ollama as a semantic judge — exact string matching fails for
+# natural language ("Jacob" vs "the patriarch Jacob" are the same answer).
+# Ollama judges equivalence the way a human grader would.
 
 OLLAMA_URL   = "http://localhost:11434/api/generate"
 OLLAMA_MODEL = "llama3.2:3b"
@@ -32,47 +30,64 @@ mlflow.set_tracking_uri(f"file:///{MLFLOW_DIR}")
 mlflow.set_experiment("knowledge-trainer")
 
 
-def call_ollama(prompt: str) -> str:
-    """Send a prompt to Ollama and return the response."""
+def call_ollama(prompt: str, timeout: int = 60) -> str:
     payload = {"model": OLLAMA_MODEL, "prompt": prompt, "stream": False}
-    response = requests.post(OLLAMA_URL, json=payload, timeout=60)
+    response = requests.post(OLLAMA_URL, json=payload, timeout=timeout)
     response.raise_for_status()
     return response.json()["response"].strip()
 
 
-def get_student_answer(question: str, model, tokenizer, top_k: int = 5) -> str:
+def load_page_text(source: str, pages_dir: str) -> str:
+    """Load the Wikipedia page text for a given source title."""
+    # source is like "Israel" — match to Israel.txt
+    pattern = os.path.join(pages_dir, "*.txt")
+    for filepath in glob.glob(pattern):
+        basename = os.path.basename(filepath).replace(".txt", "").replace("_", " ")
+        if basename.lower() == source.lower():
+            with open(filepath, "r", encoding="utf-8") as f:
+                return f.read()
+    return ""
+
+
+def get_student_answer(question: str, context: str, model, tokenizer) -> str:
     """
-    Ask the student model a question using masked language modeling.
-    We append [MASK] to the question and ask the model to fill it in.
-    The top predicted token becomes the student's answer.
+    Ask the QA model to extract an answer from the context passage.
+    This is extractive QA — the model finds the answer span in the text.
     """
-    # Format: "Question: Who invented the telephone? Answer: [MASK]"
-    masked_input = f"Question: {question} Answer: [MASK]"
+    # Truncate context to fit within model limits
+    context_words = context.split()[:800]
+    context = " ".join(context_words)
 
     inputs = tokenizer(
-        masked_input,
+        question,
+        context,
         return_tensors="pt",
         truncation=True,
         max_length=512,
     )
 
-    mask_idx = (inputs["input_ids"] == tokenizer.mask_token_id).nonzero(as_tuple=True)[1]
-
     with torch.no_grad():
         outputs = model(**inputs)
 
-    logits       = outputs.logits[0, mask_idx, :]
-    top_token_ids = logits.topk(top_k).indices[0].tolist()
-    predictions   = [tokenizer.decode([tid]).strip() for tid in top_token_ids]
+    # Get the most likely start and end positions of the answer span
+    start_idx = outputs.start_logits.argmax()
+    end_idx   = outputs.end_logits.argmax()
 
-    return ", ".join(predictions)
+    if end_idx < start_idx:
+        end_idx = start_idx
+
+    # Cap answer length to 20 tokens max
+    if end_idx - start_idx > 20:
+        end_idx = start_idx + 20
+
+    answer_tokens = inputs["input_ids"][0][start_idx : end_idx + 1]
+    answer = tokenizer.decode(answer_tokens, skip_special_tokens=True).strip()
+
+    return answer if answer else "[no answer found]"
 
 
 def judge_answer(question: str, correct_answer: str, student_answer: str) -> bool:
-    """
-    Ask Ollama to judge whether the student's answer is semantically correct.
-    Returns True if correct, False if not.
-    """
+    """Ask Ollama to judge if the student answer is semantically correct."""
     prompt = f"""You are a quiz grader. Judge if the student answer is correct.
 
 Question: {question}
@@ -87,33 +102,12 @@ or NO if it is wrong or irrelevant. One word only."""
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Evaluate the student model against the quiz bank"
-    )
-    parser.add_argument(
-        "--model-dir",
-        type=str,
-        required=True,
-        help="Path to the trained model directory e.g. models/round_1"
-    )
-    parser.add_argument(
-        "--quiz-bank",
-        type=str,
-        default="data/quiz_bank.json",
-        help="Path to quiz_bank.json"
-    )
-    parser.add_argument(
-        "--round",
-        type=int,
-        default=1,
-        help="Round number for MLflow logging"
-    )
-    parser.add_argument(
-        "--limit",
-        type=int,
-        default=None,
-        help="Limit evaluation to N questions (useful for quick checks)"
-    )
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model-dir",  type=str, required=True)
+    parser.add_argument("--quiz-bank",  type=str, default="data/quiz_bank.json")
+    parser.add_argument("--pages-dir",  type=str, default="data/pages")
+    parser.add_argument("--round",      type=int, default=1)
+    parser.add_argument("--limit",      type=int, default=None)
     args = parser.parse_args()
 
     # Load quiz bank
@@ -134,10 +128,11 @@ def main():
     model_dir = os.path.join(PROJECT_ROOT, args.model_dir)
     print(f"Loading student model from: {model_dir}")
     tokenizer = DistilBertTokenizerFast.from_pretrained(model_dir)
-    model     = DistilBertForMaskedLM.from_pretrained(model_dir)
+    model     = DistilBertForQuestionAnswering.from_pretrained(model_dir)
     model.eval()
 
-    # Run evaluation
+    pages_dir = os.path.join(PROJECT_ROOT, args.pages_dir)
+
     print(f"\nRunning evaluation...\n")
     print("=" * 60)
 
@@ -149,14 +144,20 @@ def main():
         correct_answer = item["answer"]
         source         = item.get("source", "unknown")
 
-        student_answer = get_student_answer(question, model, tokenizer)
+        # Load the relevant Wikipedia page as context
+        context = load_page_text(source, pages_dir)
+        if not context:
+            print(f"[{i+1}/{len(quiz_bank)}] SKIP — no page found for source: {source}")
+            continue
+
+        student_answer = get_student_answer(question, context, model, tokenizer)
         is_correct     = judge_answer(question, correct_answer, student_answer)
 
         if is_correct:
             correct += 1
-            verdict = "CORRECT"
+            verdict = "CORRECT ✓"
         else:
-            verdict = "WRONG"
+            verdict = "WRONG ✗"
 
         print(f"[{i+1}/{len(quiz_bank)}] {verdict}")
         print(f"  Q: {question}")
@@ -173,23 +174,21 @@ def main():
             "source":         source,
         })
 
-    score     = correct / len(quiz_bank)
+    score     = correct / len(quiz_bank) if quiz_bank else 0
     score_str = f"{correct}/{len(quiz_bank)}"
 
     print("=" * 60)
     print(f"\nFinal score: {score_str}  ({score:.0%})")
     print()
 
-    # Log to MLflow
     with mlflow.start_run(run_name=f"eval-round-{args.round}"):
-        mlflow.log_param("round",          args.round)
-        mlflow.log_param("model_dir",      args.model_dir)
-        mlflow.log_param("questions",      len(quiz_bank))
-        mlflow.log_metric("score",         score)
-        mlflow.log_metric("correct",       correct)
-        mlflow.log_metric("total",         len(quiz_bank))
+        mlflow.log_param("round",     args.round)
+        mlflow.log_param("model_dir", args.model_dir)
+        mlflow.log_param("questions", len(quiz_bank))
+        mlflow.log_metric("score",    score)
+        mlflow.log_metric("correct",  correct)
+        mlflow.log_metric("total",    len(quiz_bank))
 
-        # Save detailed results as an artifact
         results_path = os.path.join(PROJECT_ROOT, "data", f"eval_round_{args.round}.json")
         with open(results_path, "w", encoding="utf-8") as f:
             json.dump(results, f, indent=2, ensure_ascii=False)

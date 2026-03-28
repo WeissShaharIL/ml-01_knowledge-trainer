@@ -1,0 +1,6 @@
+venv/
+mlruns/
+__pycache__/
+*.pyc
+.env
+data/pages/

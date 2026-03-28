@@ -2,46 +2,39 @@ import argparse
 import os
 import re
 import requests
+from datetime import datetime
 
 # ── ingest.py ──────────────────────────────────────────────────────────────────
 # Step 1 of the knowledge trainer pipeline.
 # Fetches a Wikipedia page, strips all the HTML and wiki markup noise,
 # and saves clean plain text to data/pages/<title>.txt
 #
-# Why save raw .txt files instead of keeping it in memory?
-# Same reason you don't regenerate your Docker image on every deploy —
-# the raw page is the source of truth. If Ollama generates bad questions
-# or the fine-tuning produces a bad model, you can always reprocess the
-# same page without re-fetching it. Also means you can inspect exactly
-# what text the model was trained on, which is critical for debugging.
+# Also updates data/manifest.json with metadata about what was fetched,
+# so we have a complete audit trail of what data each model version saw.
 
 WIKIPEDIA_API = "https://en.wikipedia.org/w/api.php"
+PROJECT_ROOT  = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 
 def fetch_wikipedia_page(url: str) -> tuple[str, str]:
-    """
-    Given a Wikipedia URL, fetch the page title and clean plain text content.
-    Returns (title, text).
-    """
-    # Extract the page title from the URL
-    # e.g. https://en.wikipedia.org/wiki/Alan_Turing → Alan_Turing
     title = url.rstrip("/").split("/wiki/")[-1]
-    title = requests.utils.unquote(title)  # decode %20 etc.
+    title = requests.utils.unquote(title)
 
     print(f"Fetching: {title} ...")
 
-    # Use the Wikipedia API to get clean plain text — much better than
-    # scraping HTML which is full of nav menus, references, and markup
     params = {
-        "action":      "query",
-        "titles":      title,
-        "prop":        "extracts",
-        "explaintext": True,      # plain text, no HTML
+        "action":          "query",
+        "titles":          title,
+        "prop":            "extracts",
+        "explaintext":     True,
         "exsectionformat": "plain",
-        "format":      "json",
-        "redirects":   True,      # follow redirects automatically
+        "format":          "json",
+        "redirects":       True,
     }
 
-    response = requests.get(WIKIPEDIA_API, params=params, timeout=15)
+    response = requests.get(WIKIPEDIA_API, params=params, headers={
+        "User-Agent": "Mozilla/5.0 (compatible; KnowledgeTrainer/1.0; shahar@example.com)"
+    })
     response.raise_for_status()
     data = response.json()
 
@@ -51,24 +44,17 @@ def fetch_wikipedia_page(url: str) -> tuple[str, str]:
     if "missing" in page:
         raise ValueError(f"Wikipedia page not found: {title}")
 
-    raw_text = page.get("extract", "")
+    raw_text    = page.get("extract", "")
     clean_title = page.get("title", title)
-
-    # Clean up the text — remove excessive blank lines and whitespace
-    # We keep section structure (headers like == History ==) because
-    # they help the question generator understand context boundaries
-    text = re.sub(r"\n{3,}", "\n\n", raw_text).strip()
+    text        = re.sub(r"\n{3,}", "\n\n", raw_text).strip()
 
     return clean_title, text
 
 
 def save_page(title: str, text: str, output_dir: str) -> str:
-    """Save the page text to output_dir/<safe_title>.txt"""
     os.makedirs(output_dir, exist_ok=True)
-
-    # Make the title safe for use as a filename
     safe_title = re.sub(r'[\\/*?:"<>|]', "_", title).replace(" ", "_")
-    filepath = os.path.join(output_dir, f"{safe_title}.txt")
+    filepath   = os.path.join(output_dir, f"{safe_title}.txt")
 
     with open(filepath, "w", encoding="utf-8") as f:
         f.write(f"TITLE: {title}\n")
@@ -78,28 +64,49 @@ def save_page(title: str, text: str, output_dir: str) -> str:
     return filepath
 
 
+def update_ingest_log(title: str, url: str, word_count: int, filepath: str):
+    """
+    Update data/ingest_log.json with metadata about this fetch.
+    This log is used by pipeline.py to pass page metadata to versioning.
+    """
+    log_path = os.path.join(PROJECT_ROOT, "data", "ingest_log.json")
+
+    # Load existing log
+    if os.path.exists(log_path):
+        import json
+        with open(log_path, "r", encoding="utf-8") as f:
+            log = json.load(f)
+    else:
+        log = {}
+
+    log[title] = {
+        "title":      title,
+        "url":        url,
+        "word_count": word_count,
+        "filepath":   filepath,
+        "fetched_at": datetime.now().isoformat(),
+    }
+
+    import json
+    with open(log_path, "w", encoding="utf-8") as f:
+        json.dump(log, f, indent=2, ensure_ascii=False)
+
+    print(f"Ingest log updated: data/ingest_log.json")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Fetch a Wikipedia page and save it to data/pages/"
     )
-    parser.add_argument(
-        "--url",
-        type=str,
-        required=True,
-        help='Wikipedia URL e.g. "https://en.wikipedia.org/wiki/Alan_Turing"'
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=str,
-        default="data/pages",
-        help="Directory to save page text (default: data/pages)"
-    )
+    parser.add_argument("--url",        type=str, required=True)
+    parser.add_argument("--output-dir", type=str, default="data/pages")
     args = parser.parse_args()
 
     title, text = fetch_wikipedia_page(args.url)
-    filepath = save_page(title, text, args.output_dir)
+    output_dir  = os.path.join(PROJECT_ROOT, args.output_dir)
+    filepath    = save_page(title, text, output_dir)
+    word_count  = len(text.split())
 
-    word_count = len(text.split())
     print(f"Saved: {filepath}")
     print(f"Title: {title}")
     print(f"Words: {word_count:,}")
@@ -107,6 +114,9 @@ def main():
     print("-" * 40)
     print(text[:300])
     print("-" * 40)
+
+    update_ingest_log(title, args.url, word_count, filepath)
+
     print("\nNext step: run generate_quiz.py")
 
 

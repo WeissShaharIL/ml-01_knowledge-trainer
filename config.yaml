@@ -1,0 +1,30 @@
+# ── config.yaml ────────────────────────────────────────────────────────────────
+# Central configuration for the Knowledge Trainer pipeline.
+# Edit this file to change pipeline behavior without touching any code.
+
+# ── Hardware ───────────────────────────────────────────────────────────────────
+hardware:
+  # Options: "cpu" | "cuda" (NVIDIA GPU) | "auto" (use GPU if available, else CPU)
+  device: "cpu"
+
+# ── Training ───────────────────────────────────────────────────────────────────
+training:
+  epochs: 3
+  batch_size: 4         # increase to 16 or 32 when using GPU
+  base_model: "distilbert-base-uncased-distilled-squad"
+
+# ── Quiz generation ────────────────────────────────────────────────────────────
+quiz:
+  questions_per_page: 5
+  max_words_per_page: 1000   # how much of each page to send to Ollama
+  ollama_model: "llama3.2:3b"
+  ollama_timeout: 300
+
+# ── Evaluation ─────────────────────────────────────────────────────────────────
+evaluation:
+  ollama_timeout: 60
+  context_words: 800         # how much context to give the QA model per question
+
+# ── Versioning ─────────────────────────────────────────────────────────────────
+versioning:
+  initial_version: "1.0.0"
